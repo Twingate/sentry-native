@@ -27,7 +27,7 @@ extern "C" {
 
 typedef struct {
     sentry_run_t *run;
-    const char *dump_path;
+    char *dump_path;
 } breakpad_transport_state_t;
 
 static void
@@ -50,6 +50,7 @@ sentry__breakpad_backend_send_envelope(
     if (!item) {
         sentry__path_free(dump_path);
         sentry_envelope_free(envelope);
+        SENTRY_DEBUGF("failed to add minidump %s", state->dump_path);
         return;
     }
     sentry__envelope_item_set_header(
@@ -67,6 +68,16 @@ sentry__breakpad_backend_send_envelope(
 }
 
 static void
+sentry__breakpad_state_free(void *_state)
+{
+    breakpad_transport_state_t *state = (breakpad_transport_state_t*) _state;
+    if (state->dump_path) {
+        sentry_free(state->dump_path);
+    }
+    sentry_free(state);
+}
+
+static void
 sentry__enforce_breakpad_transport(
     const sentry_options_t *options, const char *dump_path)
 {
@@ -75,7 +86,19 @@ sentry__enforce_breakpad_transport(
         return;
     }
     state->run = options->run;
-    state->dump_path = dump_path;
+
+    /* HACK: I noticed that when an app receives SIGSEGV because of memset(nullptr, 0x0, 1), sentry_capture_event() corrupts MinidumpDescriptor::path_
+     * From other side, malloc in the crash handler can cause extra issues because of compromised environment (when libc allocator metadata is corrupted), but in our situation it helps.
+     * TODO: investigate what corrupts MinidumpDescriptor::path_ */
+
+    if (!dump_path) {
+        return;
+    }
+    state->dump_path = (char*) sentry_malloc(strlen(dump_path)+1);
+    if (!state->dump_path) {
+        return;
+    }
+    strcpy(state->dump_path, dump_path);
 
     sentry_transport_t *transport
         = sentry_transport_new(sentry__breakpad_backend_send_envelope);
@@ -84,7 +107,7 @@ sentry__enforce_breakpad_transport(
         return;
     }
     sentry_transport_set_state(transport, state);
-    sentry_transport_set_free_func(transport, sentry_free);
+    sentry_transport_set_free_func(transport, sentry__breakpad_state_free);
 
     ((sentry_options_t *)options)->transport = transport;
 }
